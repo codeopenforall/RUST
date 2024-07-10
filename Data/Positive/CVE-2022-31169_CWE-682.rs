@@ -1,0 +1,70 @@
+    fn load_constant64_full(&mut self, value: u64) -> Reg {
+        // If the top 32 bits are zero, use 32-bit `mov` operations.
+        let (num_half_words, size, negated) = if value >> 32 == 0 {
+            (2, OperandSize::Size32, (!value << 32) >> 32)
+        } else {
+            (4, OperandSize::Size64, !value)
+        };
+        // If the number of 0xffff half words is greater than the number of 0x0000 half words
+        // it is more efficient to use `movn` for the first instruction.
+        let first_is_inverted = count_zero_half_words(negated, num_half_words)
+            > count_zero_half_words(value, num_half_words);
+        // Either 0xffff or 0x0000 half words can be skipped, depending on the first
+        // instruction used.
+        let ignored_halfword = if first_is_inverted { 0xffff } else { 0 };
+        let mut first_mov_emitted = false;
+
+        let rd = self.temp_writable_reg(I64);
+
+        for i in 0..num_half_words {
+            let imm16 = (value >> (16 * i)) & 0xffff;
+            if imm16 != ignored_halfword {
+                if !first_mov_emitted {
+                    first_mov_emitted = true;
+                    if first_is_inverted {
+                        let imm =
+                            MoveWideConst::maybe_with_shift(((!imm16) & 0xffff) as u16, i * 16)
+                                .unwrap();
+                        self.emit(&MInst::MovWide {
+                            op: MoveWideOp::MovN,
+                            rd,
+                            imm,
+                            size,
+                        });
+                    } else {
+                        let imm = MoveWideConst::maybe_with_shift(imm16 as u16, i * 16).unwrap();
+                        self.emit(&MInst::MovWide {
+                            op: MoveWideOp::MovZ,
+                            rd,
+                            imm,
+                            size,
+                        });
+                    }
+                } else {
+                    let imm = MoveWideConst::maybe_with_shift(imm16 as u16, i * 16).unwrap();
+                    self.emit(&MInst::MovWide {
+                        op: MoveWideOp::MovK,
+                        rd,
+                        imm,
+                        size,
+                    });
+                }
+            }
+        }
+
+        assert!(first_mov_emitted);
+
+        return self.writable_reg_to_reg(rd);
+
+        fn count_zero_half_words(mut value: u64, num_half_words: u8) -> usize {
+            let mut count = 0;
+            for _ in 0..num_half_words {
+                if value & 0xffff == 0 {
+                    count += 1;
+                }
+                value >>= 16;
+            }
+
+            count
+        }
+    }
